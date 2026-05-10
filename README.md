@@ -1,0 +1,153 @@
+# GoodBois
+
+A voice-first kiosk for less tech-savvy elderly residents in HDB void decks. Speaks Mandarin, Hokkien, and other SEA languages. Triages requests, signposts to the right agency / hotline / local resource, and escalates complex cases to MP/RC volunteers as structured cases.
+
+Built for **The Good Hack 2026**.
+
+**Stack:** Next.js 16 (Cloudflare Pages) · TypeScript · Tailwind v4 + shadcn/ui · Cloudflare Workers · Cloudflare Workers AI (STT / TTS / LLM) · SEALion (translation) · Cloudflare D1 / R2 / KV
+
+For the locked stack and architecture, read `docs/system-design/tech-stack.md`. For the product brief, read `docs/care-access-map-prd-and-backlog.md`.
+
+---
+
+## Pipeline
+
+```
+Resident speaks (Mandarin / Hokkien / English / …)
+   │
+   ▼
+Cloudflare Worker (orchestrator) — see docs/refactor/2026-05-09-llm-turn-decision.md
+   ├─ STT (transcribe + detect source language)        → { transcript_en, srcLang }
+   ├─ Classifier LLM (loops on ask_followup)           → ClassifierDecision
+   ├─ Main LLM (emits the turn decision)               → LLMTurnDecision
+   │     { requestType, kioskMessage, toolCalls[] }
+   ├─ Tool dispatch (orchestrator walks toolCalls[] in order):
+   │     • signpost(agencyKey)
+   │     • reportHazard(category, location, description)   ← demo stub
+   │     • generateReceipt(...)                            ← MANDATORY
+   ├─ Translate kioskMessage (English → srcLang)
+   └─ TTS (audio out in srcLang)
+   │
+   ▼
+Kiosk plays response, shows full-screen HTML receipt with the structured handoff,
+then resets the session for the next user.
+```
+
+**Key principles:**
+- The frontend never calls Workers AI or SEALion directly. All AI calls go through the orchestrator Worker.
+- The kiosk speaks back in whatever language the user spoke — the language tile is gone; STT detects.
+- `kioskMessage` is the conversational reply (chat bubble + TTS source). The receipt body is a separate field inside `generateReceipt.args`.
+- Sessions are single-shot. KV state is wiped after each terminal turn.
+
+---
+
+## Quick Start
+
+The legacy FastAPI + Supabase scaffold has been removed. The active build sits in `src/` for the kiosk frontend and `workers/` for the Cloudflare Worker backend.
+
+### 1. Clone & install
+
+```bash
+git clone <your-repo-url>
+cd <your-repo>
+npm install
+```
+
+### 2. Frontend dev server
+
+```bash
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+### 3. Worker dev
+
+```bash
+# First time:
+npm install -g wrangler
+wrangler login
+
+# Per session:
+cd workers
+wrangler dev
+```
+
+The Worker runs at `http://127.0.0.1:8787`. Frontend reads `NEXT_PUBLIC_WORKER_URL` to find it.
+
+### 4. Configure environment variables
+
+```bash
+cp .env.example .env.local
+```
+
+```env
+NEXT_PUBLIC_WORKER_URL=http://127.0.0.1:8787
+NEXT_PUBLIC_KIOSK_LANG_DEFAULT=en
+NEXT_PUBLIC_SCRIPTED_DEMO=true
+```
+
+Worker secrets are managed via `wrangler secret put` — see `docs/system-design/tech-stack.md` "Env & secrets".
+
+---
+
+## Project Structure (target)
+
+```
+.
+├── src/                   # Next.js kiosk frontend
+│   ├── app/               # App Router routes
+│   ├── components/
+│   │   ├── ui/            # shadcn primitives
+│   │   ├── atoms/         # reusable kiosk controls
+│   │   └── kiosk/         # kiosk feature composites
+│   ├── lib/
+│   └── types/             # TS types matching data-contracts.md
+│
+├── workers/               # Cloudflare Worker backend (orchestrator + tools)
+│   ├── src/
+│   │   ├── orchestrator/
+│   │   ├── tools/
+│   │   ├── ai/            # STT / TTS / translate / LLM clients
+│   │   ├── db/            # D1 access (Drizzle or raw)
+│   │   └── pdf/
+│   ├── migrations/        # D1 SQL migrations
+│   └── wrangler.toml
+│
+└── docs/
+    ├── system-design/
+    │   ├── tech-stack.md           # SSOT for stack + architecture rules
+    │   ├── architecture.md
+    │   └── integration-boundaries.md
+    ├── standards/
+    │   ├── data-contracts.md       # canonical types
+    │   ├── product-principles.md
+    │   └── ui-ux-standards.md
+    ├── hackathon/
+    │   ├── mvp-execution-plan.md
+    │   └── definition-of-done.md
+    └── care-access-map-prd-and-backlog.md   # kiosk PRD (filename predates the pivot)
+```
+
+---
+
+## Documentation
+
+For new team members and AI agents:
+
+1. `docs/refactor/2026-05-09-llm-turn-decision.md` — **canonical spec for the agent flow.** Read first.
+2. `docs/START_HERE_FOR_NEW_AGENTS.md`
+3. `AGENTS.md` (or `CLAUDE.md` / `.codex/skills/care-access-map/SKILL.md` for tool-specific rules)
+4. `docs/hackathon/agent-launch-packet.md` — mock-first contract and golden path
+5. `docs/hackathon/build-day-scaffold.md` — scaffold handoff
+6. `docs/system-design/tech-stack.md` — locked stack
+7. `docs/standards/data-contracts.md` — canonical types
+8. `docs/strategy/judging-criteria-alignment.md` — the rubric we're optimising for, plus GTM / sustainability / regional-scaling docs in the same folder
+
+---
+
+## Deploying
+
+- **Frontend** → Cloudflare Pages
+- **Worker** → Cloudflare Workers (`wrangler deploy`)
+- **Data** → Cloudflare D1, R2, KV (free tier covers expected demo load)
